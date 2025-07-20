@@ -398,7 +398,7 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s [options] <capcode> <message>\n"
 		"or:\n"
-		"%s [options] [-l] (from stdin)\n\n"
+		"%s [options] [-l] - (from stdin)\n\n"
 		
 		"Options:\n"
 		"   -d <device>    Serial device (default: %s)\n"
@@ -499,10 +499,14 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 		*is_stdin = 0;
 	}
-	else if (argc - non_opt_start == 0) /* Stdin mode */
+	else if (argc - non_opt_start == 1 && strcmp(argv[non_opt_start], "-") == 0) {
+		/* Stdin mode: requires "-" argument */
 		*is_stdin = 1;
-	else
+	}
+	else {
+		/* No arguments or invalid arguments */
 		usage(argv[0]);
+	}
 }
 
 /**
