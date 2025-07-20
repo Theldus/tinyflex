@@ -415,7 +415,7 @@ static void usage(const char *prgname)
 
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE'\n"
-		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'",
+		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'\n",
 		prgname, prgname, DEFAULT_DEVICE, DEFAULT_BAUDRATE,
 		DEFAULT_FREQUENCY, DEFAULT_POWER, prgname, prgname,
 		prgname, prgname);
