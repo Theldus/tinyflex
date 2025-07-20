@@ -29,7 +29,7 @@
 /* Default serial parameters */
 #define DEFAULT_DEVICE    "/dev/ttyACM0"
 #define DEFAULT_BAUDRATE  115200
-#define DEFAULT_FREQUENCY 929.9375
+#define DEFAULT_FREQUENCY 916.0
 #define DEFAULT_POWER     2
 
 static int loop_enabled = 0;
