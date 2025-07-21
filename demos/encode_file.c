@@ -20,6 +20,7 @@
 #include "tinyflex.h"
 
 static int loop_enabled = 0;
+static int mail_drop_enabled = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -72,14 +73,18 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s <capcode> <message> <output_file>\n"
 		"or:\n"
-		"%s [-l] (from stdin/stdout)\n\n"
+		"%s [-l] [-m] (from stdin/stdout)\n\n"
+		
+		"Options:\n"
+		"   -l Loop mode: stays open receiving new lines of messages until EOF\n"
+		"   -m Mail Drop: sets the Mail Drop Flag in the FLEX message\n\n"
 		
 		"Stdin/stdout mode:\n"
-		"   -l Loop mode (optional): stays open receiving new lines of messages\n"
-		"                            until EOF\n"
 		"   Example:\n"
 		"     printf '1234567:MY MESSAGE'               | %s (no loop mode)\n"
 		"     printf '1234567:MY MSG1\\n1122334:MY MSG2' | %s -l (loop mode)\n"
+		"     printf '1234567:MY MESSAGE'               | %s -m (mail drop)\n"
+		"     printf '1234567:MY MESSAGE'               | %s -l -m (both)\n"
 		"   (binary output goes to stdout!)\n\n"
 
 		"   Note: On loop mode, each output is preceded by a line indicating\n"
@@ -90,8 +95,9 @@ static void usage(const char *prgname)
 		"   <binary output>\n\n"
 
 		"Normal mode:\n"
-		"   %s 1234567 'MY MESSAGE' output.bin",
-		prgname, prgname, prgname, prgname, prgname);
+		"   %s 1234567 'MY MESSAGE' output.bin\n"
+		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)",
+		prgname, prgname, prgname, prgname, prgname, prgname, prgname, prgname);
 	exit(1);
 }
 
@@ -108,30 +114,51 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	char **out_file)
 {
 	size_t msg_size;
+	int i;
+	int normal_mode_args = 0;
 
-	/* Normal mode: ./prgname <capcode> <message> <output_file> */
-	if (argc == 4) {
-		if (str2uint64(capcode, argv[1]) < 0) {
-			fprintf(stderr, "Invalid capcode: %s\n", argv[1]);
+	/* Parse flags first */
+	for (i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "-l") == 0) {
+			loop_enabled = 1;
+		} else if (strcmp(argv[i], "-m") == 0) {
+			mail_drop_enabled = 1;
+		} else {
+			normal_mode_args++;
+		}
+	}
+
+	/* Normal mode with optional -m flag: ./prgname [-m] <capcode> <message> <output_file> */
+	if (normal_mode_args == 3) {
+		int arg_idx = 1;
+		
+		/* Skip flags */
+		while (arg_idx < argc && (strcmp(argv[arg_idx], "-l") == 0 || strcmp(argv[arg_idx], "-m") == 0)) {
+			arg_idx++;
+		}
+		
+		if (arg_idx + 2 >= argc) {
 			usage(argv[0]);
 		}
 
-		if ((msg_size = strlen(argv[2])) >= MAX_CHARS_ALPHA) {
+		if (str2uint64(capcode, argv[arg_idx]) < 0) {
+			fprintf(stderr, "Invalid capcode: %s\n", argv[arg_idx]);
+			usage(argv[0]);
+		}
+
+		if ((msg_size = strlen(argv[arg_idx + 1])) >= MAX_CHARS_ALPHA) {
 			fprintf(stderr, "Message too long (max %d characters).\n",
 				MAX_CHARS_ALPHA - 1);
 			usage(argv[0]);
 		}
-		memcpy(msg, argv[2], msg_size + 1);
+		memcpy(msg, argv[arg_idx + 1], msg_size + 1);
 
-		*out_file = argv[3];
+		*out_file = argv[arg_idx + 2];
 		return;
 	}
 
-	/* Stdin/stdout mode: ./prgname or ./prgname -l */
-	if (argc == 1 || (argc == 2 && strcmp(argv[1], "-l") == 0)) {
-		if (argc == 2) {
-			loop_enabled = 1;
-		}
+	/* Stdin/stdout mode: ./prgname [-l] [-m] */
+	if (normal_mode_args == 0) {
 		*out_file = NULL; /* Indicate output to stdout */
 		return;
 	}
@@ -222,7 +249,10 @@ int main(int argc, char **argv)
 			goto error;
 		}
 
-		read_size = tf_encode_flex_message(message, capcode, vec, sizeof vec, &err);
+		struct tf_message_config config = {0};
+		config.mail_drop = mail_drop_enabled;
+		read_size = tf_encode_flex_message_ex(message, capcode, vec, sizeof vec, &err, &config);
+		
 		if (err >= 0)
 			write(fd, vec, read_size);
 		else
@@ -243,7 +273,10 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		read_size = tf_encode_flex_message(message, capcode, vec, sizeof vec, &err);
+		struct tf_message_config config = {0};
+		config.mail_drop = mail_drop_enabled;
+		read_size = tf_encode_flex_message_ex(message, capcode, vec, sizeof vec, &err, &config);
+		
 		if (err >= 0) {
 			if (loop_enabled)
 				printf("%zu\n", read_size);

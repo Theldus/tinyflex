@@ -87,6 +87,12 @@ static const uint8_t flex_cblock[]     = {0xAE,0xD8,0x45,0x12,0x7B};
 #define TF_INVALID_CAPCODE    2
 #define TF_INVALID_FLEXBUFFER 3
 
+/* Message configuration structure for extended API */
+struct tf_message_config {
+	uint8_t mail_drop;  /* 0 or 1 - Mail Drop Flag */
+	/* Reserved for future flags */
+};
+
 /**
  * @brief Calculates the bit parity of a given 32-bit word provided in @p x.
  * @param x Word to be calculated the bit-parity.
@@ -426,7 +432,7 @@ static void interleave_block(uint32_t block_num, uint32_t *frame_words)
  */
 static void
 create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
-	uint32_t msg_start, uint32_t *fwc_p, int is_long)
+	uint32_t msg_start, uint32_t *fwc_p, int is_long, const struct tf_message_config *config)
 {
 	uint32_t msg_word[MAX_WORDS_ALPHA] = {0};
 	uint32_t word_idx;
@@ -447,6 +453,11 @@ create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
 	/* Set bits f0f1 == 11 (per Sec 3.8.8.3), in order to indicate an initial
 	 * fragment. */ 
 	msg_word[0] = 0x1800;
+	
+	/* Set Mail Drop Flag if requested */
+	if (config && config->mail_drop) {
+		msg_word[0] |= (1 << 20);
+	}
 
 	/* Process characters. */
 	while (i < max_len) {
@@ -557,6 +568,27 @@ create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
 
 /**
  * @brief Encodes an alphanumeric message given by @p msg, targeting
+ * the given @p cap_code, with extended configuration options.
+ *
+ * @param msg       [in]  ASCII Message to be sent.
+ * @param cap_code        A short or long address pager cap code.
+ * @param flex_pckt [out] An output buffer that will holds the entire encoded message.
+ *                        The user should provide a buffer of at least FLEX_BUFFER_SIZE
+ *                        bytes.
+ * @param flex_size       Output buffer size.
+ * @param error     [out] Error flag pointer that indicates whether the encoding was
+ *                        successful or not.
+ * @param config    [in]  Optional configuration for message flags. Pass NULL for defaults.
+ *
+ * @return Returns the number of bytes successfully written into the output
+ *         or zero otherwise.
+ */
+size_t
+tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error, const struct tf_message_config *config);
+
+/**
+ * @brief Encodes an alphanumeric message given by @p msg, targeting
  * the given @p cap_code.
  *
  * @param msg       [in]  ASCII Message to be sent.
@@ -572,8 +604,8 @@ create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
  *         or zero otherwise.
  */
 size_t
-tf_encode_flex_message(const char *msg, uint64_t cap_code,
-	uint8_t *flex_pckt, size_t flex_size, int *error)
+tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error, const struct tf_message_config *config)
 {
 	uint32_t frame_words[WORDS_PER_FRAME] = {0};
 	uint8_t  *flex_pkt_ptr;
@@ -637,7 +669,7 @@ tf_encode_flex_message(const char *msg, uint64_t cap_code,
 		frame_words[fwc++] = create_short_address(cap_code);
 
 	/* Create alphanumeric message. */
-	create_alphanumeric_msg(frame_words, msg, 3 + is_long, &fwc, is_long);
+	create_alphanumeric_msg(frame_words, msg, 3 + is_long, &fwc, is_long, config);
 
 	/* If our block is not fully filled yet, we should fill with
 	 * idle blocks of all 1s and all 0s, per Section 3.4.1.
@@ -656,6 +688,13 @@ tf_encode_flex_message(const char *msg, uint64_t cap_code,
 
 	SAVE_VEC(flex_pkt_ptr, frame_words);
 	return ((size_t)(flex_pkt_ptr - flex_pckt));
+}
+
+size_t
+tf_encode_flex_message(const char *msg, uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error)
+{
+	return tf_encode_flex_message_ex(msg, cap_code, flex_pckt, flex_size, error, NULL);
 }
 
 #if 0
