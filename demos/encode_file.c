@@ -104,7 +104,7 @@ static void usage(const char *prgname)
 
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE' output.bin\n"
-		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)",
+		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)\n",
 		prgname, prgname, prgname, prgname, prgname, prgname,
 		prgname, prgname);
 	exit(1);
