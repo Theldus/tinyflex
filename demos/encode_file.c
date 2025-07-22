@@ -16,10 +16,12 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <limits.h>
+#include <getopt.h>
 
 #include "tinyflex.h"
 
 static int loop_enabled = 0;
+static int mail_drop_enabled = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -72,17 +74,28 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s <capcode> <message> <output_file>\n"
 		"or:\n"
-		"%s [-l] (from stdin/stdout)\n\n"
+		"%s [-l] [-m] (from stdin/stdout)\n\n"
+		
+		"Options:\n"
+		"   -l Loop mode: stays open receiving new lines of "
+		"messages until EOF\n"
+		"   -m Mail Drop: sets the Mail Drop Flag in the FLEX "
+		"message\n\n"
 		
 		"Stdin/stdout mode:\n"
-		"   -l Loop mode (optional): stays open receiving new lines of messages\n"
-		"                            until EOF\n"
 		"   Example:\n"
-		"     printf '1234567:MY MESSAGE'               | %s (no loop mode)\n"
-		"     printf '1234567:MY MSG1\\n1122334:MY MSG2' | %s -l (loop mode)\n"
+		"     printf '1234567:MY MESSAGE'               | %s "
+		"(no loop mode)\n"
+		"     printf '1234567:MY MSG1\\n1122334:MY MSG2' | %s -l "
+		"(loop mode)\n"
+		"     printf '1234567:MY MESSAGE'               | %s -m "
+		"(mail drop)\n"
+		"     printf '1234567:MY MESSAGE'               | %s -l -m "
+		"(both)\n"
 		"   (binary output goes to stdout!)\n\n"
 
-		"   Note: On loop mode, each output is preceded by a line indicating\n"
+		"   Note: On loop mode, each output is preceded by a line "
+		"indicating\n"
 		"         how many bytes follows, ex:\n"
 		"   795\\n"
 		"   <binary output>\n"
@@ -90,8 +103,10 @@ static void usage(const char *prgname)
 		"   <binary output>\n\n"
 
 		"Normal mode:\n"
-		"   %s 1234567 'MY MESSAGE' output.bin",
-		prgname, prgname, prgname, prgname, prgname);
+		"   %s 1234567 'MY MESSAGE' output.bin\n"
+		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)",
+		prgname, prgname, prgname, prgname, prgname, prgname,
+		prgname, prgname);
 	exit(1);
 }
 
@@ -108,30 +123,49 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	char **out_file)
 {
 	size_t msg_size;
+	int opt;
+	int non_opt_start;
 
-	/* Normal mode: ./prgname <capcode> <message> <output_file> */
-	if (argc == 4) {
-		if (str2uint64(capcode, argv[1]) < 0) {
-			fprintf(stderr, "Invalid capcode: %s\n", argv[1]);
+	/* Parse options using getopt */
+	while ((opt = getopt(argc, argv, "lm")) != -1) {
+		switch (opt) {
+		case 'l':
+			loop_enabled = 1;
+			break;
+		case 'm':
+			mail_drop_enabled = 1;
+			break;
+		default:
+			usage(argv[0]);
+		}
+	}
+
+	non_opt_start = optind;
+
+	/* Check remaining arguments */
+	if (argc - non_opt_start == 3) {
+		/* Normal mode: capcode, message, output file */
+		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
+			fprintf(stderr, "Invalid capcode: %s\n", 
+				argv[non_opt_start]);
 			usage(argv[0]);
 		}
 
-		if ((msg_size = strlen(argv[2])) >= MAX_CHARS_ALPHA) {
-			fprintf(stderr, "Message too long (max %d characters).\n",
+		msg_size = strlen(argv[non_opt_start + 1]);
+		if (msg_size >= MAX_CHARS_ALPHA) {
+			fprintf(stderr,
+				"Message too long (max %d characters).\n",
 				MAX_CHARS_ALPHA - 1);
 			usage(argv[0]);
 		}
-		memcpy(msg, argv[2], msg_size + 1);
+		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 
-		*out_file = argv[3];
+		*out_file = argv[non_opt_start + 2];
 		return;
 	}
 
-	/* Stdin/stdout mode: ./prgname or ./prgname -l */
-	if (argc == 1 || (argc == 2 && strcmp(argv[1], "-l") == 0)) {
-		if (argc == 2) {
-			loop_enabled = 1;
-		}
+	/* Stdin/stdout mode: no non-option arguments */
+	if (argc - non_opt_start == 0) {
 		*out_file = NULL; /* Indicate output to stdout */
 		return;
 	}
@@ -169,7 +203,8 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 	colon_pos = strchr(*line_ptr, ':');
 	if (colon_pos == NULL) {
 		fprintf(stderr,
-			"Invalid input: '%s', expected 'capcode:message'\n", *line_ptr);		
+			"Invalid input: '%s', expected 'capcode:message'\n",
+			*line_ptr);
 		return 2;
 	}
 	*colon_pos = '\0';
@@ -183,7 +218,8 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 	msg_len         = read_len - (current_message - *line_ptr);
 
 	if (msg_len >= MAX_CHARS_ALPHA) {
-		fprintf(stderr, "Message too long in input: '%s' (max %d chars).\n",
+		fprintf(stderr,
+			"Message too long in input: '%s' (max %d chars).\n",
 			current_message, MAX_CHARS_ALPHA - 1);
 		return 2;
 	}
@@ -218,15 +254,21 @@ int main(int argc, char **argv)
 	if (out_file != NULL) {
 		fd = creat(out_file, S_IRUSR|S_IWUSR);
 		if (fd < 0) {
-			fprintf(stderr, "Unable to open output file '%s'!\n", out_file);
+			fprintf(stderr, "Unable to open output file '%s'!\n",
+				out_file);
 			goto error;
 		}
 
-		read_size = tf_encode_flex_message(message, capcode, vec, sizeof vec, &err);
+		struct tf_message_config config = {0};
+		config.mail_drop = mail_drop_enabled;
+		read_size = tf_encode_flex_message_ex(message, capcode, vec,
+			sizeof vec, &err, &config);
+		
 		if (err >= 0)
 			write(fd, vec, read_size);
 		else
-			fprintf(stderr, "Error encoding message: %s\n", msg_errors[-err]);
+			fprintf(stderr, "Error encoding message: %s\n",
+				msg_errors[-err]);
 
 		goto exit;
 	}
@@ -243,14 +285,19 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		read_size = tf_encode_flex_message(message, capcode, vec, sizeof vec, &err);
+		struct tf_message_config config = {0};
+		config.mail_drop = mail_drop_enabled;
+		read_size = tf_encode_flex_message_ex(message, capcode, vec,
+			sizeof vec, &err, &config);
+		
 		if (err >= 0) {
 			if (loop_enabled)
 				printf("%zu\n", read_size);
 			write(STDOUT_FILENO, vec, read_size);
 		} 
 		else {
-			fprintf(stderr, "Error encoding message: %s\n", msg_errors[-err]);
+			fprintf(stderr, "Error encoding message: %s\n",
+				msg_errors[-err]);
 			if (!loop_enabled)
 				goto error;
 		}
