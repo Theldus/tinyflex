@@ -46,15 +46,23 @@ int main(void) {
 }
 ```
 
-The main concept is simple: once you obtain the FLEX-encoded packet, you can use
-any external tool to transmit it, such as [GNURadio] or [ttgo-fsk-tx].
+tinyflex outputs raw binary data that must be transmitted at 1600 bps / 2-FSK
+with a deviation of ±4800 Hz (as per the FLEX specification, Section 3.1
+Modulation).
 
-[GNURadio]: https://www.gnuradio.org/about/
+The concept is simple: once you obtain the raw FLEX-encoded data, you can use an
+external tool to transmit it.
+
+The easiest way to transmit, if you have a LoRa32-OLED v2.1.6 board, is using
+[ttgo-fsk-tx]. For transmitting with an SDR, see the GNU Radio flowchart
+available under `demos/gnuradio`.
+
 [ttgo-fsk-tx]: https://github.com/rlaneth/ttgo-fsk-tx/
 
 ## Companion programs
-The `demo/` directory contains two companion programs to facilitate library
-usage: `encode_file` and `send_ttgo`.
+The `demo` directory contains companion programs to facilitate library usage:
+`encode_file` and `send_ttgo`, plus a `gnuradio` subdirectory with transmission
+examples.
 
 ### `encode_file`
 Designed for transmission tools that work with file input and/or communicate
@@ -63,14 +71,18 @@ via pipes, `encode_file` provides an easy way to generate FLEX packets:
 ```bash
 ./encode_file <capcode> <message> <output_file>
 or:
-./encode_file [-l] (from stdin/stdout)
+./encode_file [-l] [-m] (from stdin/stdout)
+
+Options:
+   -l Loop mode: stays open receiving new lines of messages until EOF
+   -m Mail Drop: sets the Mail Drop Flag in the FLEX message
 
 Stdin/stdout mode:
-   -l Loop mode (optional): stays open receiving new lines of messages
-                            until EOF
    Example:
      printf '1234567:MY MESSAGE'               | ./encode_file (no loop mode)
      printf '1234567:MY MSG1\n1122334:MY MSG2' | ./encode_file -l (loop mode)
+     printf '1234567:MY MESSAGE'               | ./encode_file -m (mail drop)
+     printf '1234567:MY MESSAGE'               | ./encode_file -l -m (both)
    (binary output goes to stdout!)
 
    Note: On loop mode, each output is preceded by a line indicating
@@ -80,6 +92,8 @@ Stdin/stdout mode:
 
 Normal mode:
    ./encode_file 1234567 'MY MESSAGE' output.bin
+   ./encode_file -m 1234567 'MY MESSAGE' output.bin (with mail drop)
+
 ```
 
 `encode_file` allows you to save packets to an output file or generate new
@@ -97,24 +111,48 @@ and pipes:
 ```bash
 ./send_ttgo [options] <capcode> <message>
 or:
-./send_ttgo [options] [-l] (from stdin)
+./send_ttgo [options] [-l] [-m] - (from stdin)
 
 Options:
    -d <device>    Serial device (default: /dev/ttyACM0)
    -b <baudrate>  Baudrate (default: 115200)
-   -f <frequency> Frequency in MHz (default: 929.937500)
+   -f <frequency> Frequency in MHz (default: 916.000000)
    -p <power>     TX power (default: 2, 2-17)
+   -l             Loop mode: stays open receiving new lines until EOF
+   -m             Mail Drop: sets the Mail Drop Flag in the FLEX message
 
 Stdin mode:
-   -l Loop mode (optional): stays open receiving new lines
-                            until EOF
    Example:
      printf '1234567:MY MESSAGE'               | ./send_ttgo
      printf '1234567:MY MSG1\n1122334:MY MSG2' | ./send_ttgo -l
+     printf '1234567:MY MESSAGE'               | ./send_ttgo -m
+     printf '1234567:MY MESSAGE'               | ./send_ttgo -l -m
 
 Normal mode:
    ./send_ttgo 1234567 'MY MESSAGE'
+   ./send_ttgo -m 1234567 'MY MESSAGE'
    ./send_ttgo -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'
+
+```
+
+### GNU Radio
+The `demos/gnuradio` directory contains a flowchart demonstrating how to
+transmit a single file encoded by `encode_file` using a HackRF (and can be
+easily adapted for other devices).
+
+To run the flowchart as-is:
+1. Compile the tools under `demos`
+2. Run `encode_file` with appropriate parameters to generate your message
+3. Place the encoded file as `encoded.bin` under the `gnuradio` directory
+4. Run the flowchart
+
+Example:
+```bash
+cd demos
+make
+./encode_file 1234567 'HELLO WORLD' gnuradio/encoded.bin
+cd gnuradio
+gnuradio-companion hackrf_file_tx_demo.grc
 ```
 
 ## Acknowledgements
