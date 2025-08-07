@@ -194,6 +194,15 @@ dedicated Grafana webhook service for seamless alert forwarding.
 
 [Flex HTTP Server]: https://github.com/geekinsanemx/flex-http-server
 
+### [flex-fsk-tx]
+A command-line FSK transmitter application that sends FLEX pager messages
+over serial using AT commands.
+Originally based on [tinyflex](https://github.com/Theldus/tinyflex),
+and [ttgo-fsk-tx](https://github.com/rlaneth/ttgo-fsk-tx)
+adapted for Heltec WiFi Lora32 v3 boards with chip SX1262 LoRa32
+
+[flex-fsk-tx]: https://github.com/geekinsanemx/flex-fsk-tx
+
 ## Acknowledgements
 This project came from discussions and experiments on paging that I have worked
 on along with [@rlaneth]. He's gifted me a Motorola Advisor Elite pager and a
