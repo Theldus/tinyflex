@@ -34,6 +34,7 @@
 
 static int loop_enabled = 0;
 static int mail_drop_enabled = 0;
+static int numeric_mode = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -407,22 +408,26 @@ static void usage(const char *prgname)
 		"   -f <frequency> Frequency in MHz (default: %f)\n"
 		"   -p <power>     TX power (default: %d, 2-17)\n"
 		"   -l             Loop mode: stays open receiving new lines until EOF\n"
-		"   -m             Mail Drop: sets the Mail Drop Flag in the FLEX message\n\n"
+		"   -m             Mail Drop: sets the Mail Drop Flag in the FLEX message\n"
+		"   -n             Numeric mode: encode message as numeric (0-9-_[]\\s)\n\n"
 
 		"Stdin mode:\n"
 		"   Example:\n"
 		"     printf '1234567:MY MESSAGE'               | %s\n"
 		"     printf '1234567:MY MSG1\\n1122334:MY MSG2' | %s -l\n"
 		"     printf '1234567:MY MESSAGE'               | %s -m\n"
+		"     printf '1234567:123-456'                  | %s -n\n"
 		"     printf '1234567:MY MESSAGE'               | %s -l -m\n\n"
 
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE'\n"
 		"   %s -m 1234567 'MY MESSAGE'\n"
+		"   %s -n 1234567 '123-456'\n"
 		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'\n",
 		prgname, prgname, DEFAULT_DEVICE, DEFAULT_BAUDRATE,
 		DEFAULT_FREQUENCY, DEFAULT_POWER, prgname, prgname,
-		prgname, prgname, prgname, prgname, prgname);
+		prgname, prgname, prgname, prgname, prgname, prgname,
+		prgname);
 	exit(1);
 }
 
@@ -450,7 +455,7 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	config->power     = DEFAULT_POWER;
 
 	/* Parse options */
-	while ((opt = getopt(argc, argv, "d:b:f:p:lm")) != -1) {
+	while ((opt = getopt(argc, argv, "d:b:f:p:lmn")) != -1) {
 		switch (opt) {
 		case 'd':
 			config->device = optarg;
@@ -482,6 +487,9 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		case 'm':
 			mail_drop_enabled = 1;
 			break;
+		case 'n':
+			numeric_mode = 1;
+			break;
 		default:
 			usage(argv[0]);
 		}
@@ -498,10 +506,19 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 			usage(argv[0]);
 		}
 
-		if ((msg_size = strlen(argv[non_opt_start + 1])) >= MAX_CHARS_ALPHA) {
-			fprintf(stderr, "Message too long (max %d characters).\n",
-				MAX_CHARS_ALPHA - 1);
-			usage(argv[0]);
+		msg_size = strlen(argv[non_opt_start + 1]);
+		if (numeric_mode) {
+			if (msg_size >= MAX_CHARS_NUMERIC) {
+				fprintf(stderr, "Numeric message too long (max %d characters).\n",
+					MAX_CHARS_NUMERIC - 1);
+				usage(argv[0]);
+			}
+		} else {
+			if (msg_size >= MAX_CHARS_ALPHA) {
+				fprintf(stderr, "Message too long (max %d characters).\n",
+					MAX_CHARS_ALPHA - 1);
+				usage(argv[0]);
+			}
 		}
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 		*is_stdin = 0;
@@ -559,11 +576,20 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 	current_message = colon_pos + 1;
 	msg_len         = read_len - (current_message - *line_ptr);
 
-	if (msg_len >= MAX_CHARS_ALPHA) {
-		fprintf(stderr,
-			"Message too long in input: '%s' (max %d chars).\n",
-			current_message, MAX_CHARS_ALPHA - 1);
-		return 2;
+	if (numeric_mode) {
+		if (msg_len >= MAX_CHARS_NUMERIC) {
+			fprintf(stderr,
+				"Numeric message too long in input: '%s' (max %d chars).\n",
+				current_message, MAX_CHARS_NUMERIC - 1);
+			return 2;
+		}
+	} else {
+		if (msg_len >= MAX_CHARS_ALPHA) {
+			fprintf(stderr,
+				"Message too long in input: '%s' (max %d chars).\n",
+				current_message, MAX_CHARS_ALPHA - 1);
+			return 2;
+		}
 	}
 	memcpy(message_buf, current_message, msg_len + 1);
 	return 0;
@@ -627,8 +653,13 @@ int main(int argc, char **argv)
 	/* Normal mode */
 	if (!is_stdin) {
 		msg_config.mail_drop = mail_drop_enabled;
-		read_size = tf_encode_flex_message_ex(message, capcode, vec,
-			sizeof vec, &err, &msg_config);
+		if (numeric_mode) {
+			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+				sizeof vec, &err);
+		} else {
+			read_size = tf_encode_flex_message_ex(message, capcode, vec,
+				sizeof vec, &err, &msg_config);
+		}
 		
 		if (err >= 0) {
 			if (send_flex_via_serial(fd, &config, vec, read_size) < 0)
@@ -656,8 +687,13 @@ int main(int argc, char **argv)
 		}
 
 		msg_config.mail_drop = mail_drop_enabled;
-		read_size = tf_encode_flex_message_ex(message, capcode, vec,
-			sizeof vec, &err, &msg_config);
+		if (numeric_mode) {
+			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+				sizeof vec, &err);
+		} else {
+			read_size = tf_encode_flex_message_ex(message, capcode, vec,
+				sizeof vec, &err, &msg_config);
+		}
 		
 		if (err >= 0) {
 			if (send_flex_via_serial(fd, &config, vec, read_size) < 0) {

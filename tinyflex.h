@@ -54,6 +54,14 @@ extern "C" {
  */
 #define MAX_CHARS_ALPHA (MAX_WORDS_ALPHA * 3) - 4
 
+/* Max number of words of numeric type we can send. */
+#define MAX_WORDS_NUMERIC 8
+
+/*
+ * Biggest numeric message: (total_amount_bits - 2 kbits)/bit_per_num
+ */
+#define MAX_CHARS_NUMERIC (((MAX_WORDS_NUMERIC*MESSAGE_BITS)-2)>>2)
+
 /* Section 3.2: Synchronization signal. */
 static const uint8_t flex_bit_sync_1[] = {0xAA,0xAA,0xAA,0xAA};
 static const uint8_t flex_bs[]         = {0xAA,0xAA};
@@ -91,6 +99,26 @@ static const uint8_t flex_cblock[]     = {0xAE,0xD8,0x45,0x12,0x7B};
 struct tf_message_config {
 	uint8_t mail_drop;  /* 0 or 1 - Mail Drop Flag */
 	/* Reserved for future flags */
+};
+
+/* Message type enumeration */
+typedef enum {
+	TF_MESSAGE_TYPE_ALPHA,
+	TF_MESSAGE_TYPE_NUMERIC
+} tf_message_type_t;
+
+/* Function pointer type for message creation functions */
+typedef void (*tf_msg_create_fn_t)(uint32_t *frame_words, const char *msg,
+	uint32_t msg_start, uint32_t *fwc_p, int is_long, const void *config);
+
+/* Function pointer type for message validation functions */
+typedef int (*tf_msg_validate_fn_t)(const char *msg);
+
+/* Message type configuration */
+struct tf_message_type_config {
+	tf_msg_validate_fn_t validator;
+	tf_msg_create_fn_t creator;
+	size_t max_chars;
 };
 
 /**
@@ -270,6 +298,30 @@ create_alphanum_vector_word(uint32_t msg_start, uint32_t msg_words)
 }
 
 /**
+ * @brief Creates a FLEX Numeric Vector Word (0-9_-[]\sU)
+ *
+ * @param msg_start Beginning of the message (relative to the block) (3-87)
+ * @param msg_words Amount of words the message contains (1-8).
+ * @param kbit      4 LSBs of checksum message (Refer to section 3.10).
+ *
+ * @return Returns a filled Alphanum Vector Word properly encoded.
+ *
+ * @note Numeric Vector Word on section 3.9.1.
+ */
+static uint32_t
+create_numeric_vector_word(uint32_t msg_start, uint32_t msg_words, uint32_t kbit)
+{
+	uint32_t dw;
+	dw  = (0x3 << 4);              /* 3 == Standard Numeric Vector. */
+	dw |= (msg_start & 0x7F) << 7;
+	dw |= (msg_words & 0x7)  << 14;
+	dw |= (kbit & 0xF) << 17;
+
+	dw = flex_checksum(dw);
+	return encode_word(rev32(dw));
+}
+
+/**
  * @brief Validates a given cap code if its a valid short address.
  * @param cap_code Code to be validated.
  * @return Returns 1 if valid, 0 otherwise.
@@ -433,7 +485,7 @@ static void interleave_block(uint32_t block_num, uint32_t *frame_words)
 static void
 create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
 	uint32_t msg_start, uint32_t *fwc_p, int is_long,
-	const struct tf_message_config *config)
+	const void *config)
 {
 	uint32_t msg_word[MAX_WORDS_ALPHA] = {0};
 	uint32_t word_idx;
@@ -456,8 +508,11 @@ create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
 	msg_word[0] = 0x1800;
 	
 	/* Set Mail Drop Flag if requested */
-	if (config && config->mail_drop) {
-		msg_word[0] |= (1 << 20);
+	if (config) {
+		const struct tf_message_config *tf_config = config;
+		if (tf_config->mail_drop) {
+			msg_word[0] |= (1 << 20);
+		}
 	}
 
 	/* Process characters. */
@@ -569,27 +624,27 @@ create_alphanumeric_msg(uint32_t *frame_words, const char *msg,
 
 
 /**
- * @brief Encodes an alphanumeric message given by @p msg, targeting
- * the given @p cap_code, with extended configuration options.
+ * @brief Internal function to encode FLEX packets with common logic.
  *
- * @param msg       [in]  ASCII Message to be sent.
- * @param cap_code        A short or long address pager cap code.
- * @param flex_pckt [out] An output buffer that will holds the entire encoded
- *                        message. The user should provide a buffer of at least
- *                        FLEX_BUFFER_SIZE bytes.
- * @param flex_size       Output buffer size.
- * @param error     [out] Error flag pointer that indicates whether the
- *                        encoding was successful or not.
- * @param config    [in]  Optional configuration for message flags. Pass NULL
- *                        for defaults.
+ * @param msg         [in]  Message to be sent.
+ * @param cap_code          A short or long address pager cap code.
+ * @param flex_pckt   [out] An output buffer that will holds the entire encoded
+ *                          message. The user should provide a buffer of at least
+ *                          FLEX_BUFFER_SIZE bytes.
+ * @param flex_size         Output buffer size.
+ * @param error       [out] Error flag pointer that indicates whether the
+ *                          encoding was successful or not.
+ * @param msg_config  [in]  Message type configuration (validation, creation).
+ * @param user_config [in]  Optional user configuration for message flags.
  *
  * @return Returns the number of bytes successfully written into the output
  *         or zero otherwise.
  */
-size_t
-tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
+static size_t
+tf_encode_flex_packet_internal(const char *msg, uint64_t cap_code,
 	uint8_t *flex_pckt, size_t flex_size, int *error,
-	const struct tf_message_config *config)
+	const struct tf_message_type_config *msg_config,
+	const void *user_config)
 {
 	uint32_t frame_words[WORDS_PER_FRAME] = {0};
 	uint8_t  *flex_pkt_ptr;
@@ -603,7 +658,11 @@ tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
 
 	*error = 0;
 
-	if (!msg || *msg == '\0' || strlen(msg) > MAX_CHARS_ALPHA) {
+	if (!msg || *msg == '\0' || strlen(msg) > msg_config->max_chars) {
+		*error = -TF_INVALID_MESSAGE;
+		return 0;
+	}
+	if (msg_config->validator && !msg_config->validator(msg)) {
 		*error = -TF_INVALID_MESSAGE;
 		return 0;
 	}
@@ -652,8 +711,8 @@ tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
 	else
 		frame_words[fwc++] = create_short_address(cap_code);
 
-	/* Create alphanumeric message. */
-	create_alphanumeric_msg(frame_words, msg, 3 + is_long, &fwc, is_long, config);
+	/* Create message using type-specific function. */
+	msg_config->creator(frame_words, msg, 3 + is_long, &fwc, is_long, user_config);
 
 	/* If our block is not fully filled yet, we should fill with
 	 * idle blocks of all 1s and all 0s, per Section 3.4.1.
@@ -669,9 +728,41 @@ tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
 	for (i = 0; i < BLOCKS_PER_FRAME; i++)
 		interleave_block(i, frame_words);
 
-
 	SAVE_VEC(flex_pkt_ptr, frame_words);
 	return ((size_t)(flex_pkt_ptr - flex_pckt));
+}
+
+/**
+ * @brief Encodes an alphanumeric message given by @p msg, targeting
+ * the given @p cap_code, with extended configuration options.
+ *
+ * @param msg       [in]  ASCII Message to be sent.
+ * @param cap_code        A short or long address pager cap code.
+ * @param flex_pckt [out] An output buffer that will holds the entire encoded
+ *                        message. The user should provide a buffer of at least
+ *                        FLEX_BUFFER_SIZE bytes.
+ * @param flex_size       Output buffer size.
+ * @param error     [out] Error flag pointer that indicates whether the
+ *                        encoding was successful or not.
+ * @param config    [in]  Optional configuration for message flags. Pass NULL
+ *                        for defaults.
+ *
+ * @return Returns the number of bytes successfully written into the output
+ *         or zero otherwise.
+ */
+size_t
+tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error,
+	const struct tf_message_config *config)
+{
+	static const struct tf_message_type_config alpha_config = {
+		.max_chars = MAX_CHARS_ALPHA,
+		.validator = NULL,  /* No special validation for alpha messages */
+		.creator = create_alphanumeric_msg
+	};
+
+	return tf_encode_flex_packet_internal(msg, cap_code, flex_pckt, flex_size,
+		error, &alpha_config, config);
 }
 
 /**
@@ -696,6 +787,170 @@ tf_encode_flex_message(const char *msg, uint64_t cap_code,
 {
 	return tf_encode_flex_message_ex(msg, cap_code, flex_pckt, flex_size,
 		error, NULL);
+}
+
+/**
+ * @brief Returns the equivalent FLEX numeric value for a given
+ * valid ASCII digit.
+ *
+ * @param ch ASII digit to be cnverted.
+ *
+ * @return The FLEX equivalent nuemric value.
+ *
+ * @note See section 3.10.2, table 3.10.2.1: Numeric character table.
+ */
+static uint8_t get_numeric_value(uint8_t ch)
+{
+	if (ch >= '0' && ch <= '9')
+		return ch - '0';
+
+	switch (ch) {
+		case 'U': return 0xB;
+		case 'u': return 0xB;
+		case ' ': return 0xC;
+		case '-': return 0xD;
+		case '_': return 0xD;
+		case ']': return 0xE;
+		case '[': return 0xF;
+		default:  return 0;
+	}
+}
+
+/**
+ * @brief Validates if a message contains only valid numeric characters.
+ *
+ * @param msg Message to validate.
+ * @return Returns 1 if valid, 0 otherwise.
+ */
+static int is_valid_numeric_message(const char *msg)
+{
+	const char *p = msg;
+
+	while (*p != '\0') {
+		char c = *p;
+		if (!(c >= '0' && c <= '9') && c != '-' && c != '_' && 
+		    c != '[' && c != ']' && c != ' ' && c != 'U' && c != 'u') {
+			return 0;
+		}
+		p++;
+	}
+	return 1;
+}
+
+/**
+ * @brief Encodes a given numeric message into the a proper alphanumeric FLEX
+ * message (0-9_-[]\s).
+ *
+ * @param frame_words [in/out] Words list for a given frame.
+ * @param msg         [in]     Numeric message to be encoded.
+ * @param msg_start            Block number in which the message starts inside
+ *                             the frame.
+ * @param fwc_p       [in/out] Frame word counter: keeps track of how many words
+ *                             have been written until now.
+ *
+ * @note Numeric encoding described at: Reference Document A, Sec 3.8.8.1
+ */
+static void
+create_numeric_msg(uint32_t *frame_words, const char *msg, uint32_t msg_start,
+	uint32_t *fwc_p, int is_long, const void *config)
+{
+	uint32_t msg_words[8] = {0};
+	uint8_t last_ch; /* Last character.    */
+	int last_shift; /* Last shift.         */
+	uint32_t k_bit; /* K-bit/checksum.     */
+	int bit_shift;  /* Bit shift.          */
+	int word_idx;   /* Word index.         */
+	uint32_t fwc;   /* Frame word counter. */
+	uint8_t ch;     /* Current character.  */
+	int i;
+
+	((void)config);
+
+	last_shift = 0;
+	bit_shift  = 2;
+	word_idx   = 0;
+	i = 0;
+
+	while (msg[i] != 0 && word_idx < 8) {
+		if (bit_shift < 21) {
+			/* Previous overflowed char. */
+			if (last_shift) {
+				ch = get_numeric_value(last_ch) >> (4 - last_shift);
+				msg_words[word_idx] |= ((uint32_t)ch << bit_shift);
+				bit_shift += last_shift;
+				last_shift = 0;
+				continue;
+			}
+			/* Current char. */
+			ch = get_numeric_value(msg[i++]);
+			msg_words[word_idx] |= ((uint32_t)ch << bit_shift) & 0x1FFFFF;
+			bit_shift += 4;
+			continue;
+		}
+		/* Prepare for overflow. */
+		last_ch    = msg[i - 1];
+		last_shift = bit_shift - 21;
+		bit_shift  = 0;
+		word_idx  += 1;
+	}
+
+	/* Padding. */
+	for (; bit_shift < 18; bit_shift += 4)
+		msg_words[word_idx] |= ((uint32_t)0xC << bit_shift);
+
+	/* Calculate checksum. */
+	for (i = 0, k_bit = 0; i <= word_idx; i++) {
+		uint32_t g1 =  msg_words[i] & 0xFF;
+		uint32_t g2 = (msg_words[i] >>  8) & 0xFF;
+		uint32_t g3 = (msg_words[i] >> 16) & 0x1F;
+		k_bit += (g1+g2+g3);
+	}
+
+	k_bit &= 0xFF;
+	k_bit  = (k_bit & 0x3F) + (k_bit >> 6);
+	k_bit  = ~k_bit;
+	msg_words[0] |= (k_bit >> 4) & 0x3; /* k5k4 bits from checksum. */
+
+	/* == Add our data into the destination frame words. == */
+	fwc = *fwc_p;
+
+	frame_words[fwc++] = create_numeric_vector_word(msg_start + is_long,
+		word_idx, k_bit);
+
+	for (i = 0; i <= word_idx; i++)
+		frame_words[fwc++] = encode_word(rev32(msg_words[i]));
+
+	*fwc_p = fwc;
+}
+
+/**
+ * @brief Encodes a numeric message given by @p msg, targeting
+ * the given @p cap_code.
+ *
+ * @param msg       [in]  Numeric message to be sent (0-9-_[]\s)
+ * @param cap_code        A short or long address pager cap code.
+ * @param flex_pckt [out] An output buffer that will holds the entire encoded
+ *                        message. The user should provide a buffer of at least
+ *                        FLEX_BUFFER_SIZE bytes.
+ * @param flex_size       Output buffer size.
+ * @param error     [out] Error flag pointer that indicates whether the
+ *                        encoding was successful or not.
+ *
+ * @return Returns the number of bytes successfully written into the output
+ *         or zero otherwise.
+ */
+size_t
+tf_encode_flex_numeric_message(const char *msg, uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error)
+{
+	static const struct tf_message_type_config numeric_config = {
+		.max_chars = MAX_CHARS_NUMERIC,
+		.validator = is_valid_numeric_message,
+		.creator   = create_numeric_msg
+	};
+
+	return tf_encode_flex_packet_internal(msg, cap_code, flex_pckt, flex_size,
+		error, &numeric_config, NULL);
 }
 
 #if 0

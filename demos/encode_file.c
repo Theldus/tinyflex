@@ -22,6 +22,7 @@
 
 static int loop_enabled = 0;
 static int mail_drop_enabled = 0;
+static int numeric_mode = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -74,13 +75,14 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s <capcode> <message> <output_file>\n"
 		"or:\n"
-		"%s [-l] [-m] (from stdin/stdout)\n\n"
+		"%s [-l] [-m] [-n] (from stdin/stdout)\n\n"
 		
 		"Options:\n"
 		"   -l Loop mode: stays open receiving new lines of "
 		"messages until EOF\n"
 		"   -m Mail Drop: sets the Mail Drop Flag in the FLEX "
-		"message\n\n"
+		"message\n"
+		"   -n Numeric mode: encode as numeric message (0-9 -_[]\\sU)\n\n"
 		
 		"Stdin/stdout mode:\n"
 		"   Example:\n"
@@ -90,6 +92,8 @@ static void usage(const char *prgname)
 		"(loop mode)\n"
 		"     printf '1234567:MY MESSAGE'               | %s -m "
 		"(mail drop)\n"
+		"     printf '1234567:12345'                    | %s -n "
+		"(numeric)\n"
 		"     printf '1234567:MY MESSAGE'               | %s -l -m "
 		"(both)\n"
 		"   (binary output goes to stdout!)\n\n"
@@ -104,9 +108,10 @@ static void usage(const char *prgname)
 
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE' output.bin\n"
-		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)\n",
+		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)\n"
+		"   %s -n 1234567 '12345' output.bin (numeric message)\n",
 		prgname, prgname, prgname, prgname, prgname, prgname,
-		prgname, prgname);
+		prgname, prgname, prgname, prgname);
 	exit(1);
 }
 
@@ -127,13 +132,16 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	int non_opt_start;
 
 	/* Parse options using getopt */
-	while ((opt = getopt(argc, argv, "lm")) != -1) {
+	while ((opt = getopt(argc, argv, "lmn")) != -1) {
 		switch (opt) {
 		case 'l':
 			loop_enabled = 1;
 			break;
 		case 'm':
 			mail_drop_enabled = 1;
+			break;
+		case 'n':
+			numeric_mode = 1;
 			break;
 		default:
 			usage(argv[0]);
@@ -152,11 +160,19 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		}
 
 		msg_size = strlen(argv[non_opt_start + 1]);
-		if (msg_size >= MAX_CHARS_ALPHA) {
-			fprintf(stderr,
-				"Message too long (max %d characters).\n",
-				MAX_CHARS_ALPHA - 1);
-			usage(argv[0]);
+		if (numeric_mode) {
+			if (msg_size >= MAX_CHARS_NUMERIC) {
+				fprintf(stderr, "Numeric message too long (max %d characters).\n",
+					MAX_CHARS_NUMERIC - 1);
+				usage(argv[0]);
+			}
+		} else {
+			if (msg_size >= MAX_CHARS_ALPHA) {
+				fprintf(stderr,
+					"Message too long (max %d characters).\n",
+					MAX_CHARS_ALPHA - 1);
+				usage(argv[0]);
+			}
 		}
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 
@@ -217,11 +233,20 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 	current_message = colon_pos + 1;
 	msg_len         = read_len - (current_message - *line_ptr);
 
-	if (msg_len >= MAX_CHARS_ALPHA) {
-		fprintf(stderr,
-			"Message too long in input: '%s' (max %d chars).\n",
-			current_message, MAX_CHARS_ALPHA - 1);
-		return 2;
+	if (numeric_mode) {
+		if (msg_len >= MAX_CHARS_NUMERIC) {
+			fprintf(stderr,
+				"Numeric message too long in input: '%s' (max %d chars).\n",
+				current_message, MAX_CHARS_NUMERIC - 1);
+			return 2;
+		}
+	} else {
+		if (msg_len >= MAX_CHARS_ALPHA) {
+			fprintf(stderr,
+				"Message too long in input: '%s' (max %d chars).\n",
+				current_message, MAX_CHARS_ALPHA - 1);
+			return 2;
+		}
 	}
 	memcpy(message_buf, current_message, msg_len + 1);
 	return 0;
@@ -261,8 +286,13 @@ int main(int argc, char **argv)
 		}
 
 		config.mail_drop = mail_drop_enabled;
-		read_size = tf_encode_flex_message_ex(message, capcode, vec,
-			sizeof vec, &err, &config);
+		if (numeric_mode) {
+			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+				sizeof vec, &err);
+		} else {
+			read_size = tf_encode_flex_message_ex(message, capcode, vec,
+				sizeof vec, &err, &config);
+		}
 		
 		if (err >= 0)
 			write(fd, vec, read_size);
@@ -286,8 +316,13 @@ int main(int argc, char **argv)
 		}
 
 		config.mail_drop = mail_drop_enabled;
-		read_size = tf_encode_flex_message_ex(message, capcode, vec,
-			sizeof vec, &err, &config);
+		if (numeric_mode) {
+			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+				sizeof vec, &err);
+		} else {
+			read_size = tf_encode_flex_message_ex(message, capcode, vec,
+				sizeof vec, &err, &config);
+		}
 		
 		if (err >= 0) {
 			if (loop_enabled)
