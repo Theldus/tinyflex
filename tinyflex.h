@@ -276,6 +276,51 @@ create_biw1(uint32_t prio, uint32_t e_biw, uint32_t s_vfield, uint32_t carry,
 }
 
 /**
+ *
+ */
+static uint32_t create_biw2(uint32_t coverage_zone, uint32_t local_id)
+{
+	uint32_t dw;
+	dw  = (0 << 4);
+	dw |= (coverage_zone & 0x1F)  << 7;
+	dw |= (local_id      & 0x1FF) << 12;
+
+	dw = flex_checksum(dw);
+	return encode_word(rev32(dw));
+}
+
+/**
+ *
+ */
+static uint32_t create_biw3(uint32_t d, uint32_t m, uint32_t y)
+{
+	uint32_t dw;
+	dw  = (1 << 4);         /* Type 001 -> m/d/y   */
+	dw |= (y & 0x1F) << 7;  /* Year:  s0s4, 5 bits.   */
+	dw |= (d & 0x1F) << 12; /* Day:   s5s9, 5 bits.   */
+	dw |= (m &  0xF) << 17; /* Month: s10s13, 4 bits. */
+
+	dw = flex_checksum(dw);
+	return encode_word(rev32(dw));
+}
+
+/**
+ *
+ */
+static uint32_t create_biw4(uint32_t s, uint32_t m, uint32_t h)
+{
+	uint32_t dw;
+	dw  = (2 << 4);         /* Type 010 -> s/m/h.      */
+	dw |= (h & 0x1F) << 7;  /* Hour: s0s4, 5 bits.     */
+	dw |= (m & 0x3F) << 12; /* Minute: s5s10, 6 bits.  */
+	dw |= (s & 0x07) << 18; /* Second: s11s13, 3 bits. 
+	                           (1/8 of minute)         */
+
+	dw = flex_checksum(dw);
+	return encode_word(rev32(dw));
+}
+
+/**
  * @brief Creates a FLEX Alphanumeric Vector Word.
  *
  * @param msg_start Beginning of the message (relative to the block) (3-87)
@@ -701,7 +746,10 @@ tf_encode_flex_packet_internal(const char *msg, uint64_t cap_code,
 	SAVE_VEC(flex_pkt_ptr, flex_cblock);
 
 	/* BIW1 and address. */
-	frame_words[fwc++] = create_biw1(0, 0, 2 + is_long, 0, 0);
+	frame_words[fwc++] = create_biw1(0, 3, 5 + is_long, 0, 0);
+	frame_words[fwc++] = create_biw2(1, 0);
+	frame_words[fwc++] = create_biw3(1,1,1);  // USE REAL TIME
+	frame_words[fwc++] = create_biw4(1,1,1);        // USE REAL TIME
 
 	if (is_long) {
 		create_long_address(cap_code, w);
@@ -712,7 +760,103 @@ tf_encode_flex_packet_internal(const char *msg, uint64_t cap_code,
 		frame_words[fwc++] = create_short_address(cap_code);
 
 	/* Create message using type-specific function. */
-	msg_config->creator(frame_words, msg, 3 + is_long, &fwc, is_long, user_config);
+	msg_config->creator(frame_words, msg, 6 + is_long, &fwc, is_long, user_config);
+
+	/* If our block is not fully filled yet, we should fill with
+	 * idle blocks of all 1s and all 0s, per Section 3.4.1.
+	 */
+	for (; fwc < WORDS_PER_FRAME; fwc++) {
+		if ((fwc % 2) == 0)
+			frame_words[fwc] = 0xFFFFFFFF;
+		else
+			frame_words[fwc] = 0;
+	}
+
+	/* Block interleaving. */
+	for (i = 0; i < BLOCKS_PER_FRAME; i++)
+		interleave_block(i, frame_words);
+
+	SAVE_VEC(flex_pkt_ptr, frame_words);
+	return ((size_t)(flex_pkt_ptr - flex_pckt));
+}
+
+struct flex_time {
+	uint32_t h;
+	uint32_t m;
+	uint32_t s;
+	uint32_t y;
+	uint32_t mo;
+	uint32_t d;
+};
+
+/**
+ *
+ */
+size_t
+tf_encode_flex_time(uint64_t capcode, struct flex_time *ft,
+	uint8_t *flex_pckt, size_t flex_size, int *error)
+{
+	uint32_t frame_words[WORDS_PER_FRAME] = {0};
+	uint8_t  *flex_pkt_ptr;
+	uint32_t w[2];  /* Long address words.     */
+	int   is_long;  /* Is cap-code long?.      */
+	uint32_t  fwc;  /* Frame word counter.     */
+	uint32_t    i;
+
+	if (!error)
+		return 0;
+
+	*error = 0;
+
+	if (!ft) {
+		*error = -TF_INVALID_MESSAGE;
+		return 0;
+	}
+
+	if (ft->h > 23 || ft->m > 59 || ft->s > 59 ||
+		(ft->mo < 1 || ft->mo > 12) || (ft->d < 1 || ft->d > 31)) {
+		*error = -TF_INVALID_MESSAGE;
+		return 0;
+	}
+
+	if (!is_capcode_valid(capcode, &is_long)) {
+		*error = -TF_INVALID_CAPCODE;
+		return 0;
+	}
+	if (!flex_pckt || flex_size < FLEX_BUFFER_SIZE) {
+		*error = -TF_INVALID_FLEXBUFFER;
+		return 0;
+	}
+
+	fwc          = 0;
+	flex_pkt_ptr = flex_pckt;
+
+	/* Send ERS. */
+	for (i = 0; i < ERS_AMOUNT; i++) {
+		SAVE_VEC(flex_pkt_ptr, flex_bs);
+		SAVE_VEC(flex_pkt_ptr, flex_ar);
+		SAVE_VEC(flex_pkt_ptr, flex_bs_inv);
+		SAVE_VEC(flex_pkt_ptr, flex_ar_inv);
+	}
+
+	/* =================== FRAME 0 =================== */
+
+	/* Section 3.4 Transmission order: S1. */
+	SAVE_VEC(flex_pkt_ptr, flex_bit_sync_1);
+	SAVE_VEC(flex_pkt_ptr, flex_a1);
+	SAVE_VEC(flex_pkt_ptr, flex_b);
+	SAVE_VEC(flex_pkt_ptr, flex_a1_inv);
+
+	/* Frame information word for frame 0. */
+	SAVE_WORD(flex_pkt_ptr, create_fiw(0,0,0,0,0));
+
+	/* S2: BS2 + C + inv.BS2 + inv.C */
+	SAVE_VEC(flex_pkt_ptr, flex_cblock);
+
+	frame_words[fwc++] = create_biw1(0, 3, 4, 0, 0);
+	frame_words[fwc++] = create_biw2(1, 0);
+	frame_words[fwc++] = create_biw3(1,1,1); /* 1995-01-01. */
+	frame_words[fwc++] = create_biw4(1,1,1); /* 01:01:01.   */
 
 	/* If our block is not fully filled yet, we should fill with
 	 * idle blocks of all 1s and all 0s, per Section 3.4.1.

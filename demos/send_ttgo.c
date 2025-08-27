@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <limits.h>
+#include <time.h>
 
 #include "tinyflex.h"
 
@@ -35,6 +36,9 @@
 static int loop_enabled = 0;
 static int mail_drop_enabled = 0;
 static int numeric_mode = 0;
+static int time_current = 0;
+static int time_custom = 0;
+static struct flex_time custom_time;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -118,6 +122,73 @@ static int str2uint64(uint64_t *out, const char *s)
         return -1;
 
     *out = (uint64_t)ul;
+    return 0;
+}
+
+/**
+ * @brief Parses a time string in format "YYYY-MM-DD HH:MM:SS" into flex_time struct.
+ *
+ * @param time_str String to parse.
+ * @param ft Pointer to flex_time struct to fill.
+ * @return Returns 0 on success, -1 on error.
+ */
+static int parse_time_string(const char *time_str, struct flex_time *ft)
+{
+    int year, month, day, hour, minute, second;
+    
+    if (!time_str || !ft)
+        return -1;
+    
+    if (sscanf(time_str, "%d-%d-%d %d:%d:%d", 
+               &year, &month, &day, &hour, &minute, &second) != 6)
+        return -1;
+    
+    /* Validate ranges */
+    if (year < 1900 || year > 2050 ||
+        month < 1 || month > 12 ||
+        day < 1 || day > 31 ||
+        hour < 0 || hour > 23 ||
+        minute < 0 || minute > 59 ||
+        second < 0 || second > 59)
+        return -1;
+    
+    ft->y = year;
+    ft->mo = month;
+    ft->d = day;
+    ft->h = hour;
+    ft->m = minute;
+    ft->s = second;
+    
+    return 0;
+}
+
+/**
+ * @brief Gets current system time and converts to flex_time struct.
+ *
+ * @param ft Pointer to flex_time struct to fill.
+ * @return Returns 0 on success, -1 on error.
+ */
+static int get_current_time(struct flex_time *ft)
+{
+    time_t now;
+    struct tm *local_time;
+    
+    if (!ft)
+        return -1;
+    
+    time(&now);
+    local_time = localtime(&now);
+    
+    if (!local_time)
+        return -1;
+    
+    ft->y = local_time->tm_year + 1900;
+    ft->mo = local_time->tm_mon + 1;
+    ft->d = local_time->tm_mday;
+    ft->h = local_time->tm_hour;
+    ft->m = local_time->tm_min;
+    ft->s = local_time->tm_sec;
+    
     return 0;
 }
 
@@ -400,7 +471,11 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s [options] <capcode> <message>\n"
 		"or:\n"
-		"%s [options] [-l] [-m] - (from stdin)\n\n"
+		"%s [options] [-l] [-m] - (from stdin)\n"
+		"or:\n"
+		"%s [options] [-t] <capcode> (send current time)\n"
+		"or:\n"
+		"%s [options] [-T \"YYYY-MM-DD HH:MM:SS\"] <capcode> (send custom time)\n\n"
 		
 		"Options:\n"
 		"   -d <device>    Serial device (default: %s)\n"
@@ -409,7 +484,9 @@ static void usage(const char *prgname)
 		"   -p <power>     TX power (default: %d, 2-17)\n"
 		"   -l             Loop mode: stays open receiving new lines until EOF\n"
 		"   -m             Mail Drop: sets the Mail Drop Flag in the FLEX message\n"
-		"   -n             Numeric mode: encode message as numeric (0-9-_[]\\s)\n\n"
+		"   -n             Numeric mode: encode message as numeric (0-9-_[]\\s)\n"
+		"   -t             Send current system time to pager\n"
+		"   -T <time>      Send custom time in format \"YYYY-MM-DD HH:MM:SS\"\n\n"
 
 		"Stdin mode:\n"
 		"   Example:\n"
@@ -423,11 +500,16 @@ static void usage(const char *prgname)
 		"   %s 1234567 'MY MESSAGE'\n"
 		"   %s -m 1234567 'MY MESSAGE'\n"
 		"   %s -n 1234567 '123-456'\n"
-		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'\n",
-		prgname, prgname, DEFAULT_DEVICE, DEFAULT_BAUDRATE,
+		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'\n\n"
+
+		"Time mode:\n"
+		"   %s -t 1234567\n"
+		"   %s -T \"2025-08-25 14:30:45\" 1234567\n"
+		"   %s -d /dev/ttyUSB0 -t 1234567\n",
+		prgname, prgname, prgname, prgname, DEFAULT_DEVICE, DEFAULT_BAUDRATE,
 		DEFAULT_FREQUENCY, DEFAULT_POWER, prgname, prgname,
 		prgname, prgname, prgname, prgname, prgname, prgname,
-		prgname);
+		prgname, prgname, prgname, prgname);
 	exit(1);
 }
 
@@ -455,7 +537,7 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	config->power     = DEFAULT_POWER;
 
 	/* Parse options */
-	while ((opt = getopt(argc, argv, "d:b:f:p:lmn")) != -1) {
+	while ((opt = getopt(argc, argv, "d:b:f:p:lmntT:")) != -1) {
 		switch (opt) {
 		case 'd':
 			config->device = optarg;
@@ -490,6 +572,17 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		case 'n':
 			numeric_mode = 1;
 			break;
+		case 't':
+			time_current = 1;
+			break;
+		case 'T':
+			if (parse_time_string(optarg, &custom_time) < 0) {
+				fprintf(stderr, "Invalid time format: %s\n", optarg);
+				fprintf(stderr, "Expected format: \"YYYY-MM-DD HH:MM:SS\"\n");
+				usage(argv[0]);
+			}
+			time_custom = 1;
+			break;
 		default:
 			usage(argv[0]);
 		}
@@ -497,8 +590,15 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 
 	non_opt_start = optind;
 
+	/* Validate mutually exclusive options */
+	if ((time_current && time_custom) || 
+	    ((time_current || time_custom) && (loop_enabled || numeric_mode || mail_drop_enabled))) {
+		fprintf(stderr, "Time options (-t, -T) are mutually exclusive with message modes (-l, -m, -n)\n");
+		usage(argv[0]);
+	}
+
 	/* Check remaining arguments */
-	if (argc - non_opt_start == 2) {
+	if (argc - non_opt_start == 2 && !time_current && !time_custom) {
 		/* Normal mode: capcode and message */
 		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
 			fprintf(stderr, "Invalid capcode: %s\n",
@@ -523,9 +623,18 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 		*is_stdin = 0;
 	}
-	else if (argc - non_opt_start == 1 && strcmp(argv[non_opt_start], "-") == 0) {
+	else if (argc - non_opt_start == 1 && strcmp(argv[non_opt_start], "-") == 0 && !time_current && !time_custom) {
 		/* Stdin mode: requires "-" argument */
 		*is_stdin = 1;
+	}
+	else if (argc - non_opt_start == 1 && (time_current || time_custom)) {
+		/* Time mode: only capcode required */
+		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
+			fprintf(stderr, "Invalid capcode: %s\n",
+				argv[non_opt_start]);
+			usage(argv[0]);
+		}
+		*is_stdin = 0;
 	}
 	else {
 		/* No arguments or invalid arguments */
@@ -652,24 +761,56 @@ int main(int argc, char **argv)
 
 	/* Normal mode */
 	if (!is_stdin) {
-		msg_config.mail_drop = mail_drop_enabled;
-		if (numeric_mode) {
-			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
-				sizeof vec, &err);
-		} else {
-			read_size = tf_encode_flex_message_ex(message, capcode, vec,
-				sizeof vec, &err, &msg_config);
-		}
-		
-		if (err >= 0) {
-			if (send_flex_via_serial(fd, &config, vec, read_size) < 0)
+		/* Time mode */
+		if (time_current || time_custom) {
+			struct flex_time ft;
+			
+			if (time_current) {
+				if (get_current_time(&ft) < 0) {
+					fprintf(stderr, "Failed to get current system time\n");
+					goto error;
+				}
+				printf("Sending current time: %04u-%02u-%02u %02u:%02u:%02u\n",
+					ft.y, ft.mo, ft.d, ft.h, ft.m, ft.s);
+			} else {
+				ft = custom_time;
+				printf("Sending custom time: %04u-%02u-%02u %02u:%02u:%02u\n",
+					ft.y, ft.mo, ft.d, ft.h, ft.m, ft.s);
+			}
+			
+			read_size = tf_encode_flex_time(capcode, &ft, vec, sizeof vec, &err);
+			
+			if (err >= 0) {
+				if (send_flex_via_serial(fd, &config, vec, read_size) < 0)
+					goto error;
+				printf("Successfully sent flex time message\n");
+			} else {
+				fprintf(stderr, "Error encoding time message: %s\n",
+					msg_errors[-err]);
 				goto error;
-			printf("Successfully sent flex message\n");
+			}
 		}
+		/* Message mode */
 		else {
-			fprintf(stderr, "Error encoding message: %s\n",
-				msg_errors[-err]);
-			goto error;
+			msg_config.mail_drop = mail_drop_enabled;
+			if (numeric_mode) {
+				read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+					sizeof vec, &err);
+			} else {
+				read_size = tf_encode_flex_message_ex(message, capcode, vec,
+					sizeof vec, &err, &msg_config);
+			}
+			
+			if (err >= 0) {
+				if (send_flex_via_serial(fd, &config, vec, read_size) < 0)
+					goto error;
+				printf("Successfully sent flex message\n");
+			}
+			else {
+				fprintf(stderr, "Error encoding message: %s\n",
+					msg_errors[-err]);
+				goto error;
+			}
 		}
 		goto exit;
 	}

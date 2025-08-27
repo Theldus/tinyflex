@@ -6,7 +6,9 @@
 #
 
 CC     ?= cc
-CFLAGS  = -Wall -Wextra -std=c89
+#CFLAGS  = -Wall -Wextra -std=c99 -fsanitize=address
+CFLAGS  = -Wall -Wextra -std=c99 -g3
+#LDFLAGS += -fsanitize=address
 CFLAGS += -I$(CURDIR)/..
 
 .PHONY: all clean
