@@ -15,9 +15,10 @@ to implement the entire FLEX specification but focuses on a subset that provides
 
 - **Speed**: 1600bps / 2-FSK
 - **Frame:** Single-frame support
-- **Messages type**: Alphanumeric (ASCII) up to 248 characters, and numeric messages up to 41 digits
+- **Messages type**: Alphanumeric (ASCII) up to 248 characters, numeric messages up to 41 digits, and tone-only messages:
   - Alphanumeric: Standard ASCII text messages
   - Numeric: Numbers (0-9) and symbols (-_[]\sU) for pager displays
+  - Tone-only: Alert-only messages with no text content
 - **Capcode**: Short and long addresses supported!
 
 ## Usage
@@ -32,6 +33,11 @@ tf_encode_flex_message(const char *msg, uint64_t cap_code,
 // For numeric messages (0-9, -, _, [, ], space, U)
 size_t
 tf_encode_flex_numeric_message(const char *msg, uint64_t cap_code,
+    uint8_t *flex_pckt, size_t flex_size, int *error);
+
+// For tone-only messages (alert only, no text)
+size_t
+tf_encode_flex_tone_only_msg(uint64_t cap_code,
     uint8_t *flex_pckt, size_t flex_size, int *error);
 ```
 
@@ -51,6 +57,10 @@ int main(void) {
     // Numeric message
     size = tf_encode_flex_numeric_message(
         "[11] 222-333", 1234567, vec, sizeof vec, &err);
+
+    // Tone-only message (alert only)
+    size = tf_encode_flex_tone_only_msg(
+        1234567, vec, sizeof vec, &err);
 
     if (!err)
         /* error. */
@@ -84,12 +94,13 @@ via pipes, `encode_file` provides an easy way to generate FLEX packets:
 ```bash
 ./encode_file <capcode> <message> <output_file>
 or:
-./encode_file [-l] [-m] [-n] (from stdin/stdout)
+./encode_file [-l] [-m] [-n] [-t] (from stdin/stdout)
 
 Options:
    -l Loop mode: stays open receiving new lines of messages until EOF
    -m Mail Drop: sets the Mail Drop Flag in the FLEX message
    -n Numeric mode: encode as numeric message (0-9 -_[]\\sU)
+   -t Tone-only mode: send tone-only message (capcode only)
 
 Stdin/stdout mode:
    Example:
@@ -97,6 +108,8 @@ Stdin/stdout mode:
      printf '1234567:MY MSG1\n1122334:MY MSG2' | ./encode_file -l (loop mode)
      printf '1234567:MY MESSAGE'               | ./encode_file -m (mail drop)
      printf '1234567:12345'                    | ./encode_file -n (numeric)
+     printf '1234567'                          | ./encode_file -t (tone-only)
+     printf '1234567\n1122334'                | ./encode_file -t -l (tone-only loop)
      printf '1234567:MY MESSAGE'               | ./encode_file -l -m (both)
    (binary output goes to stdout!)
 
@@ -109,6 +122,7 @@ Normal mode:
    ./encode_file 1234567 'MY MESSAGE' output.bin
    ./encode_file -m 1234567 'MY MESSAGE' output.bin (with mail drop)
    ./encode_file -n 1234567 '12345' output.bin (numeric message)
+   ./encode_file -t 1234567 output.bin (tone-only message)
 
 ```
 
@@ -127,7 +141,7 @@ and pipes:
 ```bash
 ./send_ttgo [options] <capcode> <message>
 or:
-./send_ttgo [options] [-l] [-m] [-n] - (from stdin)
+./send_ttgo [options] [-l] [-m] [-n] [-t] - (from stdin)
 
 Options:
    -d <device>    Serial device (default: /dev/ttyACM0)
@@ -137,6 +151,7 @@ Options:
    -l             Loop mode: stays open receiving new lines until EOF
    -m             Mail Drop: sets the Mail Drop Flag in the FLEX message
    -n             Numeric mode: encode as numeric message (0-9 -_[]\\sU)
+   -t             Tone-only mode: send tone-only message (capcode only)
 
 Stdin mode:
    Example:
@@ -144,12 +159,15 @@ Stdin mode:
      printf '1234567:MY MSG1\n1122334:MY MSG2' | ./send_ttgo -l
      printf '1234567:MY MESSAGE'               | ./send_ttgo -m
      printf '1234567:12345'                    | ./send_ttgo -n
+     printf '1234567'                          | ./send_ttgo -t
+     printf '1234567\n1122334'                | ./send_ttgo -t -l
      printf '1234567:MY MESSAGE'               | ./send_ttgo -l -m
 
 Normal mode:
    ./send_ttgo 1234567 'MY MESSAGE'
    ./send_ttgo -m 1234567 'MY MESSAGE'
    ./send_ttgo -n 1234567 '12345'
+   ./send_ttgo -t 1234567
    ./send_ttgo -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'
 
 ```
