@@ -23,6 +23,7 @@
 static int loop_enabled = 0;
 static int mail_drop_enabled = 0;
 static int numeric_mode = 0;
+static int tone_only_mode = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -75,14 +76,15 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s <capcode> <message> <output_file>\n"
 		"or:\n"
-		"%s [-l] [-m] [-n] (from stdin/stdout)\n\n"
+		"%s [-l] [-m] [-n] [-t] (from stdin/stdout)\n\n"
 		
 		"Options:\n"
 		"   -l Loop mode: stays open receiving new lines of "
 		"messages until EOF\n"
 		"   -m Mail Drop: sets the Mail Drop Flag in the FLEX "
 		"message\n"
-		"   -n Numeric mode: encode as numeric message (0-9 -_[]\\sU)\n\n"
+		"   -n Numeric mode: encode as numeric message (0-9 -_[]\\sU)\n"
+		"   -t Tone-only mode: send tone-only message (capcode only)\n\n"
 		
 		"Stdin/stdout mode:\n"
 		"   Example:\n"
@@ -94,6 +96,10 @@ static void usage(const char *prgname)
 		"(mail drop)\n"
 		"     printf '1234567:12345'                    | %s -n "
 		"(numeric)\n"
+		"     printf '1234567'                          | %s -t "
+		"(tone-only)\n"
+		"     printf '1234567\\n1122334'                | %s -t -l "
+		"(tone-only loop)\n"
 		"     printf '1234567:MY MESSAGE'               | %s -l -m "
 		"(both)\n"
 		"   (binary output goes to stdout!)\n\n"
@@ -109,9 +115,11 @@ static void usage(const char *prgname)
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE' output.bin\n"
 		"   %s -m 1234567 'MY MESSAGE' output.bin (with mail drop)\n"
-		"   %s -n 1234567 '12345' output.bin (numeric message)\n",
+		"   %s -n 1234567 '12345' output.bin (numeric message)\n"
+		"   %s -t 1234567 output.bin (tone-only message)\n",
 		prgname, prgname, prgname, prgname, prgname, prgname,
-		prgname, prgname, prgname, prgname);
+		prgname, prgname, prgname, prgname, prgname, prgname,
+		prgname);
 	exit(1);
 }
 
@@ -132,7 +140,7 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	int non_opt_start;
 
 	/* Parse options using getopt */
-	while ((opt = getopt(argc, argv, "lmn")) != -1) {
+	while ((opt = getopt(argc, argv, "lmnt")) != -1) {
 		switch (opt) {
 		case 'l':
 			loop_enabled = 1;
@@ -142,6 +150,9 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 			break;
 		case 'n':
 			numeric_mode = 1;
+			break;
+		case 't':
+			tone_only_mode = 1;
 			break;
 		default:
 			usage(argv[0]);
@@ -153,6 +164,11 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	/* Check remaining arguments */
 	if (argc - non_opt_start == 3) {
 		/* Normal mode: capcode, message, output file */
+		if (tone_only_mode) {
+			fprintf(stderr, "Tone-only mode (-t) does not accept message argument\n");
+			usage(argv[0]);
+		}
+
 		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
 			fprintf(stderr, "Invalid capcode: %s\n", 
 				argv[non_opt_start]);
@@ -177,6 +193,17 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 
 		*out_file = argv[non_opt_start + 2];
+		return;
+	}
+	
+	/* Tone-only normal mode: capcode and output file */
+	if (argc - non_opt_start == 2 && tone_only_mode) {
+		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
+			fprintf(stderr, "Invalid capcode: %s\n", 
+				argv[non_opt_start]);
+			usage(argv[0]);
+		}
+		*out_file = argv[non_opt_start + 1];
 		return;
 	}
 
@@ -218,11 +245,29 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 
 	colon_pos = strchr(*line_ptr, ':');
 	if (colon_pos == NULL) {
+		if (tone_only_mode) {
+			/* In tone-only mode, no colon is expected - just capcode */
+			if (str2uint64(capcode_ptr, *line_ptr) < 0)  {
+				fprintf(stderr, "Invalid capcode in input: '%s'\n", *line_ptr);
+				return 2;
+			}
+			message_buf[0] = '\0'; /* Empty message for tone-only */
+			return 0;
+		} else {
+			fprintf(stderr,
+				"Invalid input: '%s', expected 'capcode:message'\n",
+				*line_ptr);
+			return 2;
+		}
+	}
+
+	if (tone_only_mode) {
 		fprintf(stderr,
-			"Invalid input: '%s', expected 'capcode:message'\n",
+			"Tone-only mode (-t) does not accept message in input: '%s'\n",
 			*line_ptr);
 		return 2;
 	}
+
 	*colon_pos = '\0';
 
 	if (str2uint64(capcode_ptr, *line_ptr) < 0)  {
@@ -285,13 +330,18 @@ int main(int argc, char **argv)
 			goto error;
 		}
 
-		config.mail_drop = mail_drop_enabled;
-		if (numeric_mode) {
-			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+		if (tone_only_mode) {
+			read_size = tf_encode_flex_tone_only_msg(capcode, vec,
 				sizeof vec, &err);
 		} else {
-			read_size = tf_encode_flex_message_ex(message, capcode, vec,
-				sizeof vec, &err, &config);
+			config.mail_drop = mail_drop_enabled;
+			if (numeric_mode) {
+				read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+					sizeof vec, &err);
+			} else {
+				read_size = tf_encode_flex_message_ex(message, capcode, vec,
+					sizeof vec, &err, &config);
+			}
 		}
 		
 		if (err >= 0)
@@ -315,13 +365,18 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		config.mail_drop = mail_drop_enabled;
-		if (numeric_mode) {
-			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+		if (tone_only_mode) {
+			read_size = tf_encode_flex_tone_only_msg(capcode, vec,
 				sizeof vec, &err);
 		} else {
-			read_size = tf_encode_flex_message_ex(message, capcode, vec,
-				sizeof vec, &err, &config);
+			config.mail_drop = mail_drop_enabled;
+			if (numeric_mode) {
+				read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+					sizeof vec, &err);
+			} else {
+				read_size = tf_encode_flex_message_ex(message, capcode, vec,
+					sizeof vec, &err, &config);
+			}
 		}
 		
 		if (err >= 0) {

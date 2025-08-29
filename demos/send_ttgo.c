@@ -35,6 +35,7 @@
 static int loop_enabled = 0;
 static int mail_drop_enabled = 0;
 static int numeric_mode = 0;
+static int tone_only_mode = 0;
 static const char *msg_errors[] = {
 	"Invalid provided error pointer",
 	"Invalid message buffer",
@@ -400,7 +401,7 @@ static void usage(const char *prgname)
 	fprintf(stderr,
 		"%s [options] <capcode> <message>\n"
 		"or:\n"
-		"%s [options] [-l] [-m] - (from stdin)\n\n"
+		"%s [options] [-l] [-m] [-t] - (from stdin)\n\n"
 		
 		"Options:\n"
 		"   -d <device>    Serial device (default: %s)\n"
@@ -409,7 +410,8 @@ static void usage(const char *prgname)
 		"   -p <power>     TX power (default: %d, 2-17)\n"
 		"   -l             Loop mode: stays open receiving new lines until EOF\n"
 		"   -m             Mail Drop: sets the Mail Drop Flag in the FLEX message\n"
-		"   -n             Numeric mode: encode message as numeric (0-9-_[]\\s)\n\n"
+		"   -n             Numeric mode: encode message as numeric (0-9-_[]\\s)\n"
+		"   -t             Tone-only mode: send tone-only message (capcode only)\n\n"
 
 		"Stdin mode:\n"
 		"   Example:\n"
@@ -417,17 +419,20 @@ static void usage(const char *prgname)
 		"     printf '1234567:MY MSG1\\n1122334:MY MSG2' | %s -l\n"
 		"     printf '1234567:MY MESSAGE'               | %s -m\n"
 		"     printf '1234567:123-456'                  | %s -n\n"
+		"     printf '1234567'                          | %s -t\n"
+		"     printf '1234567\\n1122334'                 | %s -t -l\n"
 		"     printf '1234567:MY MESSAGE'               | %s -l -m\n\n"
 
 		"Normal mode:\n"
 		"   %s 1234567 'MY MESSAGE'\n"
 		"   %s -m 1234567 'MY MESSAGE'\n"
 		"   %s -n 1234567 '123-456'\n"
+		"   %s -t 1234567\n"
 		"   %s -d /dev/ttyUSB0 -f 915.5 1234567 'MY MESSAGE'\n",
 		prgname, prgname, DEFAULT_DEVICE, DEFAULT_BAUDRATE,
 		DEFAULT_FREQUENCY, DEFAULT_POWER, prgname, prgname,
-		prgname, prgname, prgname, prgname, prgname, prgname,
-		prgname);
+		prgname, prgname, prgname, prgname, prgname, prgname, prgname,
+		prgname, prgname, prgname);
 	exit(1);
 }
 
@@ -455,7 +460,7 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	config->power     = DEFAULT_POWER;
 
 	/* Parse options */
-	while ((opt = getopt(argc, argv, "d:b:f:p:lmn")) != -1) {
+	while ((opt = getopt(argc, argv, "d:b:f:p:lmnt")) != -1) {
 		switch (opt) {
 		case 'd':
 			config->device = optarg;
@@ -490,6 +495,9 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		case 'n':
 			numeric_mode = 1;
 			break;
+		case 't':
+			tone_only_mode = 1;
+			break;
 		default:
 			usage(argv[0]);
 		}
@@ -500,6 +508,11 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 	/* Check remaining arguments */
 	if (argc - non_opt_start == 2) {
 		/* Normal mode: capcode and message */
+		if (tone_only_mode) {
+			fprintf(stderr, "Tone-only mode (-t) does not accept message argument\n");
+			usage(argv[0]);
+		}
+
 		if (str2uint64(capcode, argv[non_opt_start]) < 0) {
 			fprintf(stderr, "Invalid capcode: %s\n",
 				argv[non_opt_start]);
@@ -523,9 +536,22 @@ static void read_params(uint64_t *capcode, char *msg, int argc, char **argv,
 		memcpy(msg, argv[non_opt_start + 1], msg_size + 1);
 		*is_stdin = 0;
 	}
-	else if (argc - non_opt_start == 1 && strcmp(argv[non_opt_start], "-") == 0) {
-		/* Stdin mode: requires "-" argument */
-		*is_stdin = 1;
+	else if (argc - non_opt_start == 1) {
+		if (strcmp(argv[non_opt_start], "-") == 0) {
+			/* Stdin mode: requires "-" argument */
+			*is_stdin = 1;
+		} else if (tone_only_mode) {
+			/* Tone-only mode: capcode only */
+			if (str2uint64(capcode, argv[non_opt_start]) < 0) {
+				fprintf(stderr, "Invalid capcode: %s\n",
+					argv[non_opt_start]);
+				usage(argv[0]);
+			}
+			*is_stdin = 0;
+		} else {
+			/* Single argument that's not "-" and not in tone-only mode */
+			usage(argv[0]);
+		}
 	}
 	else {
 		/* No arguments or invalid arguments */
@@ -561,11 +587,29 @@ static int read_stdin_message(uint64_t *capcode_ptr, char *message_buf,
 
 	colon_pos = strchr(*line_ptr, ':');
 	if (colon_pos == NULL) {
+		if (tone_only_mode) {
+			/* In tone-only mode, no colon is expected - just capcode */
+			if (str2uint64(capcode_ptr, *line_ptr) < 0)  {
+				fprintf(stderr, "Invalid capcode in input: '%s'\n", *line_ptr);
+				return 2;
+			}
+			message_buf[0] = '\0'; /* Empty message for tone-only */
+			return 0;
+		} else {
+			fprintf(stderr,
+				"Invalid input: '%s', expected 'capcode:message'\n",
+				*line_ptr);
+			return 2;
+		}
+	}
+
+	if (tone_only_mode) {
 		fprintf(stderr,
-			"Invalid input: '%s', expected 'capcode:message'\n",
+			"Tone-only mode (-t) does not accept message in input: '%s'\n",
 			*line_ptr);
 		return 2;
 	}
+
 	*colon_pos = '\0';
 
 	if (str2uint64(capcode_ptr, *line_ptr) < 0)  {
@@ -652,13 +696,18 @@ int main(int argc, char **argv)
 
 	/* Normal mode */
 	if (!is_stdin) {
-		msg_config.mail_drop = mail_drop_enabled;
-		if (numeric_mode) {
-			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+		if (tone_only_mode) {
+			read_size = tf_encode_flex_tone_only_msg(capcode, vec,
 				sizeof vec, &err);
 		} else {
-			read_size = tf_encode_flex_message_ex(message, capcode, vec,
-				sizeof vec, &err, &msg_config);
+			msg_config.mail_drop = mail_drop_enabled;
+			if (numeric_mode) {
+				read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+					sizeof vec, &err);
+			} else {
+				read_size = tf_encode_flex_message_ex(message, capcode, vec,
+					sizeof vec, &err, &msg_config);
+			}
 		}
 		
 		if (err >= 0) {
@@ -686,13 +735,18 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		msg_config.mail_drop = mail_drop_enabled;
-		if (numeric_mode) {
-			read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+		if (tone_only_mode) {
+			read_size = tf_encode_flex_tone_only_msg(capcode, vec,
 				sizeof vec, &err);
 		} else {
-			read_size = tf_encode_flex_message_ex(message, capcode, vec,
-				sizeof vec, &err, &msg_config);
+			msg_config.mail_drop = mail_drop_enabled;
+			if (numeric_mode) {
+				read_size = tf_encode_flex_numeric_message(message, capcode, vec,
+					sizeof vec, &err);
+			} else {
+				read_size = tf_encode_flex_message_ex(message, capcode, vec,
+					sizeof vec, &err, &msg_config);
+			}
 		}
 		
 		if (err >= 0) {

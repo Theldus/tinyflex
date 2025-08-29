@@ -322,6 +322,23 @@ create_numeric_vector_word(uint32_t msg_start, uint32_t msg_words, uint32_t kbit
 }
 
 /**
+ * @brief Creates a FLEX Tone-only/Short-message Vector Word.
+ *
+ * @return Returns a short message of type 01.
+ *
+ * @note Tone-only/Short-message Vector Word on section 3.9.2.
+ */
+static uint32_t create_tone_only_vector_word(void)
+{
+	uint32_t dw = 0;
+	dw |= (0x2 << 4);  /* Vector type v2v1v0 = 010 */
+	dw |= (0x1 << 7);  /* Message type t1t0  = 00 */
+
+	dw = flex_checksum(dw);
+	return encode_word(rev32(dw));
+}
+
+/**
  * @brief Validates a given cap code if its a valid short address.
  * @param cap_code Code to be validated.
  * @return Returns 1 if valid, 0 otherwise.
@@ -658,7 +675,7 @@ tf_encode_flex_packet_internal(const char *msg, uint64_t cap_code,
 
 	*error = 0;
 
-	if (!msg || *msg == '\0' || strlen(msg) > msg_config->max_chars) {
+	if (msg && (*msg == '\0' || strlen(msg) > msg_config->max_chars)) {
 		*error = -TF_INVALID_MESSAGE;
 		return 0;
 	}
@@ -760,6 +777,11 @@ tf_encode_flex_message_ex(const char *msg, uint64_t cap_code,
 		.validator = NULL,  /* No special validation for alpha messages */
 		.creator = create_alphanumeric_msg
 	};
+
+	if (!msg) {
+		*error = -TF_INVALID_MESSAGE;
+		return 0;
+	}
 
 	return tf_encode_flex_packet_internal(msg, cap_code, flex_pckt, flex_size,
 		error, &alpha_config, config);
@@ -949,8 +971,66 @@ tf_encode_flex_numeric_message(const char *msg, uint64_t cap_code,
 		.creator   = create_numeric_msg
 	};
 
+	if (!msg) {
+		*error = -TF_INVALID_MESSAGE;
+		return 0;
+	}
+
 	return tf_encode_flex_packet_internal(msg, cap_code, flex_pckt, flex_size,
 		error, &numeric_config, NULL);
+}
+
+/**
+ * @brief Encodes a generic FLEX tone-only message.
+ *
+ * @param frame_words [in/out] Words list for a given frame.
+ * @param msg         [in]     Numeric message to be encoded.
+ * @param msg_start            Block number in which the message starts inside
+ *                             the frame.
+ * @param fwc_p       [in/out] Frame word counter: keeps track of how many words
+ *                             have been written until now.
+ *
+ * @note Tone-only/Short-msg encoding described at: Reference Document A,
+ * Sec 3.8.7.2.
+ */
+static void
+create_tone_only_msg(uint32_t *frame_words, const char *msg, uint32_t msg_start,
+	uint32_t *fwc_p, int is_long, const void *config)
+{
+	((void)frame_words);
+	((void)msg);
+	((void)msg_start);
+	((void)is_long);
+	((void)config);
+	frame_words[(*fwc_p)++] = create_tone_only_vector_word();
+}
+
+/**
+ * @brief Encodes a generic tone-only message for the given @p capcode.
+ *
+ * @param cap_code        A short or long address pager cap code.
+ * @param flex_pckt [out] An output buffer that will holds the entire encoded
+ *                        message. The user should provide a buffer of at least
+ *                        FLEX_BUFFER_SIZE bytes.
+ * @param flex_size       Output buffer size.
+ * @param error     [out] Error flag pointer that indicates whether the
+ *                        encoding was successful or not.
+ *
+ * @return Returns the number of bytes successfully written into the output
+ *         or zero otherwise.
+ */
+size_t
+tf_encode_flex_tone_only_msg(uint64_t cap_code,
+	uint8_t *flex_pckt, size_t flex_size, int *error)
+{
+	static const struct tf_message_type_config config = {
+		.max_chars = 0,
+		.validator = NULL,
+		.creator   = create_tone_only_msg
+	};
+
+	return tf_encode_flex_packet_internal(NULL, cap_code, flex_pckt, flex_size,
+		error, &config, NULL);
 }
 
 #if 0
